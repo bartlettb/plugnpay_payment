@@ -1,0 +1,342 @@
+<?php
+
+/**
+ * @file
+ * Provides Plugnpay example form.
+ * This is specifically for demonstrating the Plugnpay payment method
+ * Set the payment method ID listed below to test plugnpay payments on your site
+ *
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function plugnpay_payment_example_menu() {
+  $items = array();
+
+  // initial payment form
+  $items['payment/plugnpay/example'] = array(
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('plugnpay_payment_example_form'),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  // confirm payment details
+  $items['payment/plugnpay/example_confirm'] = array(
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('plugnpay_payment_example_confirm_form'),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  // success/fail page
+  $items['payment/plugnpay/example_complete'] = array(
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('plugnpay_payment_example_complete_form'),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Example Form for processing payments
+ */
+function plugnpay_payment_example_form($form, &$form_state, $pid = NULL) {
+
+  //@look this is the unique id of the payment method you created for plugnpay
+  //@todo look this up by getting your payment ID by name
+  $pmid = 4;
+  $currency_code = 'USD';
+  $plugnpay_method =  entity_load_single('payment_method', $pmid);
+
+  $form['card-name'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('Cardholder name'),
+  );
+  $form['card-number'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('Card number'),
+  );
+  $form['card-exp'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('Card expiration (mmyy)'),
+    '#size' => '10',
+  );
+  $form['card-cvv'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('CVV code'),
+    '#size' => '10',
+  );
+
+  $payment = new Payment(array(
+    'context' => 'plugnpay_payment',
+    'context_data' => array(
+      'destination' => $_GET['q'],
+    ),
+    'finish_callback' => 'example_form_payment_finish',
+    'method' => $plugnpay_method,
+  ));
+
+  $form['amount'] = array(
+    '#currency_code' => $currency_code,
+    '#title' => t('Amount'),
+    '#type' => 'currency_amount',
+  );
+
+  $currencies = $plugnpay_method->controller->currencies;
+  if (isset($currencies[$currency_code]['minimum'])) {
+    $form['amount']['#minimum_amount'] = $currencies[$currency_code]['minimum'];
+  }
+  if (isset($currencies[$currency_code]['maximum'])) {
+    $form['amount']['#maximum_amount'] = $currencies[$currency_code]['maximum'];
+  }
+
+  $form_info = payment_form_embedded($form_state, $payment, array($pmid));
+
+  unset($form_info['elements']['payment_line_items']);
+  unset($form_info['elements']['payment_status']);
+
+  $form = array_merge($form, $form_info['elements']);
+
+  $form['submit'] = array(
+    '#value' => t('Confirm payment details'),
+    '#type' => 'submit',
+    '#submit' => array_merge(array('plugnpay_payment_example_form_submit'), $form_info['submit']),
+
+  );
+
+  return $form;
+}
+
+function plugnpay_payment_example_form_validate(array $form, array &$form_state) {
+  //@todo
+  // check card expiration format, card format, etc
+  $payment =& $form_state['payment'];
+  $amount = $form_state['values']['amount']['amount'];
+
+  if ($amount < 1) {
+    form_error($form['amount'], t('Negative payments are not allowed!'));
+  }
+  else {
+
+    $payment->setLineItem(new PaymentLineItem(array(
+      'amount' => $amount,
+      'description' => 'registration or donation',
+      'name' => 'example_form_payment',
+    )));
+
+    try {
+      $payment->method->validate($payment);
+    }
+    catch ( PaymentValidationException $e) {
+      $message = strlen($e->getMessage()) ? $e->getMessage() : t('The payment cannot be executed.');
+      $message = check_plain($message);
+      form_error($form['amount'], $message);
+    }
+  }
+
+}
+
+function plugnpay_payment_example_form_submit(array $form, array &$form_state) {
+
+  $payment = $form_state['payment'];
+
+  $payment->context_data['card-name'] = $form_state['values']['card-name'];
+  $payment->context_data['card-number'] = $form_state['values']['card-number'];
+  $payment->context_data['card-exp'] = $form_state['values']['card-exp'];
+  $payment->context_data['card-cvv'] = $form_state['values']['card-cvv'];
+
+  entity_save('payment', $payment);
+
+  $pid = $payment->pid;
+
+  // redirect to confirmation page
+  $form_state['redirect'] = 'payment/plugnpay/example_confirm/' . $pid;
+
+}
+
+// details confirmation
+/**
+ * Example Form for confirming payment details
+ */
+function plugnpay_payment_example_confirm_form($form, &$form_state, $pid = NULL) {
+
+  if (NULL == $pid || !is_numeric($pid)) {
+    return;
+  }
+  $payment = entity_load_single('payment', $pid);
+  if (NULL == $payment) {
+    return;
+  }
+
+  if ($payment->getStatus()->status == PAYMENT_STATUS_SUCCESS) {
+    return;
+  }
+
+  // does this person have rights to submit the payment?
+  if (!plugnpay_payment_access($pid)) {
+    return;
+  }
+
+  $card_name = $payment->context_data['card-name'];
+  $card_number = $payment->context_data['card-number'];
+  $card_cvv = $payment->context_data['card-cvv'];
+  $card_exp = $payment->context_data['card-exp'];
+
+  $new_card_number = clean_card_number($card_number);
+  $new_cvv = clean_cvv($card_cvv);
+
+  $markup = '<div class="card-details">'
+    . '<div class="card-details-header">' . t('Payment Card Details') . '</div>'
+    . '<div class="card-name">' . $card_name . '</div>'
+    . '<div class="card-number">' . $new_card_number . '</div>'
+    . '<div class="card-exp">' . $card_exp . '</div>'
+    . '<div class="card-cvv">' . $new_cvv . '</div>'
+    . '</div>';
+
+  $form['message'] = array(
+    '#type' => 'markup',
+    '#markup' => $markup,
+  );
+
+  $form['pid'] = array(
+    '#type' => 'hidden',
+    '#value' => $pid,
+  );
+
+  $form['submit'] = array(
+    '#value' => t('Confirm and pay now'),
+    '#type' => 'submit',
+  );
+  //@todo: back button to edit details
+
+  return $form;
+}
+
+function plugnpay_payment_example_confirm_form_validate(array $form, array &$form_state) {
+
+  $pid = $form_state['values']['pid'];
+
+  if (NULL == $pid || !is_numeric($pid)) {
+    form_error($form['pid'], t("No payment found with this id."));
+    return;
+  }
+  $payment = entity_load_single('payment', $pid);
+  if (NULL == $payment) {
+    form_error($form['pid'], t("No payment found with this id."));
+    return;
+  }
+  try {
+    $payment->method->validate($payment);
+  }
+  catch (PaymentValidationException $e) {
+    $message = strlen($e->getMessage()) ? $e->getMessage() : t('The payment cannot be executed.');
+    $message = check_plain($message);
+    form_error($form['amount'], $message);
+  }
+
+}
+
+function plugnpay_payment_example_confirm_form_submit(array $form, array &$form_state) {
+
+  $pid = $form_state['values']['pid'];
+
+  $payment = entity_load_single('payment', $pid);
+  if (NULL == $payment) {
+    return;
+  }
+
+  $payment->execute();
+
+  entity_save('payment', $payment);
+
+  // redirect to confirmation page
+  $form_state['redirect'] = 'payment/plugnpay/example_complete/' . $pid;
+
+}
+
+/**
+ * Implements Payment::finish_callback.
+ */
+function example_form_payment_finish(Payment $payment) {
+  $view = '';
+  if (payment_access('view', $payment)) {
+    $view = ' ' . l(t('View payment'), 'payment/' . $payment->pid) . '.';
+  }
+  if (payment_status_is_or_has_ancestor($payment->getStatus()->status, PAYMENT_STATUS_PENDING)) {
+    drupal_set_message(t('Your payment is still being processed.') . $view);
+  }
+  elseif (payment_status_is_or_has_ancestor($payment->getStatus()->status, PAYMENT_STATUS_SUCCESS)) {
+    drupal_set_message(t('Your payment was successfully completed.') . $view);
+  }
+  elseif (payment_status_is_or_has_ancestor($payment->getStatus()->status, PAYMENT_STATUS_FAILED)) {
+    drupal_set_message(t('Your payment failed.') . $view);
+  }
+
+  //drupal_goto($payment->context_data['destination']);
+  $pid = $payment->pid;
+  drupal_goto('payment/plugnpay/example_complete/' . $pid);
+}
+
+/**
+ * Example Form for going back to form details
+ */
+function plugnpay_payment_example_complete_form($form, &$form_state, $pid = NULL) {
+
+  if (NULL == $pid || !is_numeric($pid)) {
+    return;
+  }
+
+  $payment = entity_load_single('payment', $pid);
+
+  if (NULL == $payment) {
+    return;
+  }
+
+  if (FALSE == plugnpay_payment_access($pid)) {
+    return;
+  }
+
+  //@todo: show card details in markup
+  // $card_name = $payment->context_data['card-name'];
+
+  $markup = '<div class="payment-details">'
+    . '<div class="payment-details-header">' . t('Payment Details') . '</div>'
+    . '</div>';
+
+  $form['message'] = array(
+    '#type' => 'markup',
+    '#markup' => $markup,
+  );
+  return $form;
+}
+
+function clean_card_number($card_number) {
+
+  $new_card_number = '';
+
+  for ($i = 0; $i < strlen($card_number) - 4; $i++ ) {
+    $new_card_number .= 'X';
+    if (($i + 1) % 4 == 0) {
+      $new_card_number .= '-';
+    }
+  }
+  $new_card_number .= substr($card_number, -4);
+
+  return $new_card_number;
+}
+
+function clean_cvv($cvv) {
+  $new_cvv = '';
+  for ($i = 0; $i < strlen($cvv); $i++ ) {
+    $new_cvv .= 'X';
+  }
+  return $new_cvv;
+}

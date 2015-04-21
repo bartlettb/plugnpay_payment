@@ -1,0 +1,271 @@
+<?php
+
+/**
+ * @file
+ * Provides Plugnpay integration for the Payment platform.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function plugnpay_payment_menu() {
+  $items = array();
+
+  // @todo: process the payment
+  $items['payment/plugnpay/push/%'] = array(
+    'page callback' => 'plugnpay_payment_push',
+    'page arguments' => array(3),
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_payment_method_controller_info().
+ */
+function plugnpay_payment_payment_method_controller_info() {
+  return array('PlugnpayPaymentMethodController');
+}
+
+/**
+ * Implements hook_entity_load().
+ */
+function plugnpay_payment_entity_load(array $entities, $entity_type) {
+  if ($entity_type == 'payment_method') {
+    foreach ($entities as $payment_method) {
+      if ($payment_method->controller->name == 'PlugnpayPaymentMethodController') {
+        $payment_method->controller_data
+                = variable_get('plugnpay_payment_' . $payment_method->pmid . '_controller_data', array());
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_ENTITY_TYPE_ACTION().
+ */
+function plugnpay_payment_payment_method_insert(PaymentMethod $payment_method) {
+  if ($payment_method->controller->name == 'PlugnpayPaymentMethodController') {
+    variable_set('plugnpay_payment_' . $payment_method->pmid . '_controller_data',
+            $payment_method->controller_data);
+  }
+}
+
+/**
+ * Implements hook_ENTITY_TYPE_ACTION().
+ */
+function plugnpay_payment_payment_method_update(PaymentMethod $payment_method) {
+  if ($payment_method->controller->name == 'PlugnpayPaymentMethodController') {
+    variable_set('plugnpay_payment_' . $payment_method->pmid . '_controller_data',
+            $payment_method->controller_data);
+  }
+}
+
+/**
+ * Implements hook_ENTITY_TYPE_ACTION().
+ */
+function plugnpay_payment_payment_method_delete(PaymentMethod $payment_method) {
+  if ($payment_method->controller->name == 'PlugnpayPaymentMethodController') {
+    variable_del('plugnpay_payment_' . $payment_method->pmid . '_controller_data');
+  }
+}
+
+/**
+ * Push callback.
+ *
+ * @param string $pid
+ *   The id of the payment.
+ */
+function plugnpay_payment_push($pid) {
+
+  // Get data posted by Plugnpay.
+  $data = drupal_get_query_parameters($_POST);
+
+  // Access check.
+  $payment_id = $data['pid'];
+  if ($payment_id != $pid) {
+    return MENU_ACCESS_DENIED;
+  }
+
+  // Load the payment.
+  $payment = entity_load_single('payment', $pid);
+
+  $controller_data = $payment->method->controller_data;
+
+  // Get settings from controller data.
+  /*$secret_key = $controller_data['plugnpay_secret'];
+  $encryption = $controller_data['plugnpay_encryption'];
+
+  // Second access check.
+  $brq_signature = $data['BRQ_SIGNATURE'];
+  unset($data['BRQ_SIGNATURE']);
+  $check_signature = $payment->method->controller->generate_signature($data,
+          $secret_key, $encryption);
+  if ($brq_signature != $check_signature) {
+    return MENU_ACCESS_DENIED;
+  }
+*/
+
+  $payment_status = $payment->method->controller->status($data['status']);
+  $payment->setStatus(new PaymentStatusItem($payment_status));
+
+  entity_save('payment', $payment);
+}
+
+
+
+/**
+ * Payment method configuration form elements callback.
+ *
+ * @param array $form
+ * @param array $form_state
+ * @return array
+ *   A Drupal form array.
+ */
+function plugnpay_payment_method_configuration($form, &$form_state) {
+
+  $controller_data = $form_state['payment_method']->controller_data;
+
+  if (!is_array($form)) {
+    $form = array();
+  }
+
+  $form['plugnpay_account_name'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('Plugnpay account name'),
+    '#description' => t('The username for the account to use for remote transactions'),
+    '#default_value' => array_key_exists('plugnpay_account_name', $controller_data)
+        ? $controller_data['plugnpay_account_name'] : '',
+  );
+  $form['plugnpay_account_password'] = array(
+    '#type' => 'password',
+    '#required' => TRUE,
+    '#title' => t('Plugnpay account password'),
+    '#description' => t('The password for the account to use for remote transactions'),
+    '#default_value' => array_key_exists('plugnpay_account_password', $controller_data)
+        ? $controller_data['plugnpay_account_password'] : 'test',
+  );
+  $form['plugnpay_mode'] = array(
+    '#type' => 'radios',
+    '#required' => TRUE,
+    '#title' => t('Plugnpay mode'),
+    '#description' => t('Set to \'test\' if you want to run test transactions'),
+    '#options' => array(
+      'auth' => t('auth'),
+      'debug' => t('debug'),
+    ),
+    '#default_value' => isset($controller_data['plugnpay_mode'])
+        ? $controller_data['plugnpay_mode']
+        : 'test',
+  );
+
+  $form['plugnpay_payment_server'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('Payment Server URI'),
+    '#description' => t('Set the payment server address'),
+    '#default_value' => isset($controller_data['plugnpay_payment_server'])
+        ? $controller_data['plugnpay_payment_server']
+        : 'https://pay1.plugnpay.com/payment/pnpremote.cgi',
+  );
+
+  $form['plugnpay_maximum_purchase'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('Maximum purchase amount'),
+    '#description' => t('The maximum amount of a single payment transaction.'),
+    '#default_value' => array_key_exists('plugnpay_maximum_purchase', $controller_data)
+        ? $controller_data['plugnpay_maximum_purchase'] : '10000',
+  );
+  $form['plugnpay_minimum_purchase'] = array(
+    '#type' => 'textfield',
+    '#required' => TRUE,
+    '#title' => t('Minimum purchase amount'),
+    '#description' => t('The minimum amount of a single payment transaction.'),
+    '#default_value' => array_key_exists('plugnpay_minimum_purchase', $controller_data)
+        ? $controller_data['plugnpay_minimum_purchase'] : '10',
+  );
+  return $form;
+}
+
+/**
+ * Validation callback for payment method configuration form elements callback.
+ *
+ * @param array $form
+ * @param array $form_state
+ */
+function plugnpay_payment_method_configuration_validate($form, &$form_state) {
+  $values = drupal_array_get_nested_value($form_state['values'], $form['#parents']);
+
+  $form_state['payment_method']->controller_data['plugnpay_account_name'] = $values['plugnpay_account_name'];
+  $form_state['payment_method']->controller_data['plugnpay_account_password'] = $values['plugnpay_account_password'];
+  $form_state['payment_method']->controller_data['plugnpay_mode'] = $values['plugnpay_mode'];
+  $form_state['payment_method']->controller_data['plugnpay_payment_server'] = $values['plugnpay_payment_server'];
+
+}
+
+/**
+ * @todo function documentation.
+ */
+function plugnpay_payment_access($pid) {
+
+  global $user;
+
+  $payment = entity_load_single('payment', $pid);
+
+  if ( NULL == $payment) {
+    return FALSE;
+  }
+
+  //$controller_data = $payment->method->controller_data;
+  if ( $user->uid > 0 && $user->uid == $payment->uid) {
+    return TRUE;
+  }
+
+  if ( $user->uid == 0) {
+    // check the session
+    $sess_id = session_id();
+
+    $payment_session_id = array_key_exists('sessionid', $payment->context_data)
+      ? $payment->context_data['sessionid'] : '';
+
+    if ( $sess_id == $payment_session_id) {
+      return TRUE;
+    }
+  }
+
+  if ( user_access('view any payment', $user)) {
+    return TRUE;
+  }
+
+  return FALSE;
+
+}
+function plugnpay_payment_form($form, &$form_state, $pid) { // }, $hash) {
+
+  $payment = entity_load_single('payment', $pid);
+  $form_state['values']['pid'] = $pid;
+  $form = $payment->method->controller->form($payment, $form, $form_state);
+  return $form;
+}
+function plugnpay_payment_form_validate($form, &$form_state) { // }, $hash) {
+
+  $pid = in_array('pid', $form_state) ? $form_state['values']['pid'] : NULL;
+  if ( NULL == $pid ||  !is_numeric($pid)) {
+    //@ todo: throw error
+  }
+
+}
+function plugnpay_payment_form_submit($form, &$form_state) { // , $hash) {
+
+  $pid = in_array('pid', $form_state) ? $form_state['values']['pid'] : NULL;
+
+  if ( NULL !== $pid &&  is_numeric($pid)) {
+    $payment = entity_load_single('payment', $pid);
+
+  }
+
+}
